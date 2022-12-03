@@ -1,6 +1,7 @@
 #include <string>
 #include <memory>
 #include "HTTPServer.hpp"
+#include "Log.hpp"
 
 static void Usage(std::string proc)
 {
@@ -18,5 +19,6 @@ int main(int argc, char *argv[])
     std::shared_ptr<HTTPServer> http_server(new HTTPServer(port)); // 创建了一个HTTPServer对象
     http_server->InitServer();                                     // 初始化服务器
     http_server->Loop();                                           // 开始循环接收
+    // LOG(INFO, "debug project");
     return 0;
 }

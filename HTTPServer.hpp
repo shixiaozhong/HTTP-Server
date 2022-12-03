@@ -3,7 +3,8 @@
 #include <iostream>
 #include <pthread.h>
 #include "Protocol.hpp"
-#include "TcpServer.hpp"
+#include "TCPServer.hpp"
+#include "Log.hpp"
 
 #define PORT 8081
 
@@ -24,6 +25,7 @@ public:
     }
     void Loop()
     {
+        LOG(INFO, "Loop begin...");
         int listen_sock = tcp_server->Sock();
         while (!stop)
         {
@@ -32,6 +34,7 @@ public:
             int sock = accept(listen_sock, (struct sockaddr *)&peer, &len); // 接受服务器请求
             if (sock < 0)
                 continue;
+            LOG(INFO, "get a new link");
             int *_sock = new int(sock);
             pthread_t tid;
             pthread_create(&tid, nullptr, Entrance::HandlerRequest, _sock); // 创建线程
