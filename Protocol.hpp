@@ -1,17 +1,45 @@
 #pragma once
 
 #include <iostream>
-#include <unistd.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <algorithm>
 #include <sstream>
+#include <unistd.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/sendfile.h>
 #include "Util.hpp"
 #include "Log.hpp"
 
-#define SEP ": "
+#define SEP ": "                // 分隔符
+#define WEB_ROOT "wwwroot"      // web根目录
+#define HOME_PAGE "index.html"  // 首页
+#define HTTP_VERSION "HTTP/1.0" // http版本
+#define LINE_END "\r\n"         // 行分隔符
+#define OK 200                  // 响应状态码
+#define NOT_FOUND 404
+
+// 处理状态码的描述
+static std::string Code2Desc(int code)
+{
+    std::string desc;
+    switch (code)
+    {
+    case 200:
+        desc = "OK";
+        break;
+    case 404:
+        desc = "Not Found";
+        break;
+    default:
+        break;
+    }
+    return desc;
+}
 
 // 处理Http的请求
 class HttpRequest
@@ -26,17 +54,22 @@ public:
     // 解析完毕之后的结果
 
     // 存储解析请求行得到的结果
-    std::string method;
-    std::string uri;
-    std::string version;
+    std::string method;  // 方法
+    std::string uri;     // uri = path?args,按照?来分隔的
+    std::string version; // 协议版本
 
     // 存储解析报头得到的结果
     std::unordered_map<std::string, std::string> header_kv;
 
-    int content_length; //
+    int content_length;       // 正文长度
+    std::string path;         // 请求资源的路径
+    std::string suffix;       // 请求资源的后缀，表示文件类型
+    std::string query_string; // 参数
+
+    bool cgi;
 
 public:
-    HttpRequest() : content_length(0)
+    HttpRequest() : content_length(0), cgi(false)
     {
     }
     ~HttpRequest()
@@ -49,9 +82,20 @@ class HttpResponse
 {
 public:
     std::string status_line;                  // 状态行
-    std::vector<std::string> response_header; //请求报头
-    std::string blank;                        //空行
-    std::string response_body;                // 请求正文
+    std::vector<std::string> response_header; // 响应报头
+    std::string blank;                        // 空行
+    std::string response_body;                // 响应正文
+    int status_code;                          // 状态码
+    int fd;                                   // 请求文件的文件描述符
+    int size;                                 // 请求文件的大小
+public:
+    // 状态码默认设置为200
+    HttpResponse() : blank(LINE_END), status_code(OK), fd(-1)
+    {
+    }
+    ~HttpResponse()
+    {
+    }
 };
 
 // 提供读取请求，分析请求，构建响应
@@ -98,6 +142,9 @@ private:
         auto &line = http_request.request_line;
         std::stringstream ss(line);
         ss >> http_request.method >> http_request.uri >> http_request.version; // 默认按照空格来分割
+        // 将方法全部转换为大写
+        auto &method = http_request.method;
+        transform(method.begin(), method.end(), method.begin(), ::toupper);
     }
 
     // 解析报头
@@ -152,6 +199,33 @@ private:
         }
     }
 
+    // 以非cgi的方式来处理请求
+    int ProcessNonCgi(int size)
+    {
+        // 构建响应报文
+
+        http_response.fd = open(http_request.path.c_str(), O_RDONLY); // 打开待发送的文件
+        if (http_response.fd >= 0)
+        {
+            // 构建响应状态行
+            http_response.status_line = HTTP_VERSION;
+            http_response.status_line += " ";
+            http_response.status_line += std::to_string(http_response.status_code);
+            http_response.status_line += " ";
+            http_response.status_line += Code2Desc(http_response.status_code);
+            http_response.status_line += LINE_END;
+            http_response.size = size; // 设置请求文件的大小
+
+            // 设置大小
+            std::string content_length_str = "Content_Length: ";
+            content_length_str += std::to_string(size);
+            // 设置类型
+
+            return OK;
+        }
+        return 404;
+    }
+
 public:
     EndPoint(int _sock) : sock(_sock)
     {
@@ -172,10 +246,124 @@ public:
     // 构建响应
     void BuildHttpResponse()
     {
+        std::string path;                       // 临时存储路径
+        auto &code = http_response.status_code; // 存储响应状态码
+        int size = 0;                           // 存储请求文件的大小
+        std::size_t found = 0;                  // 用于截取请求文件后缀
+        // 非法请求，只支持GET和POST方法
+        if (http_request.method != "GET" && http_request.method != "POST")
+        {
+            LOG(WARRING, "method is not right");
+            code = NOT_FOUND;
+            goto END; // 跳到END标签
+        }
+        // 只有GET方法才是可以带参数的
+        if (http_request.method == "GET")
+        {
+            size_t pos = http_request.uri.find('?');
+            if (pos != std::string::npos)
+            {
+                // 调用CutSTring按照?进行切割字符串
+                Util::CutString(http_request.uri, http_request.path, http_request.query_string, "?");
+                // GET方法携带参数，需要使用cgi处理数据
+                http_request.cgi = true;
+            }
+            else
+            {
+                http_request.path = http_request.uri;
+            }
+        }
+        else if (http_request.method == "POST")
+        {
+            // 使用cgi来处理数据
+            http_request.cgi = true;
+        }
+        else
+        {
+            // TODO，扩展方法，目前只处理GET和POST方法
+        }
+        // 给path拼上web根目录
+        path = http_request.path;
+        http_request.path = WEB_ROOT;
+        http_request.path += path;
+        // 特殊处理请求根目录的情况,请求根目录的情况下提供首页的页面
+        if (http_request.path[http_request.path.size() - 1] == '/')
+        {
+            http_request.path += HOME_PAGE;
+        }
+        // std::cout << "debug: path=: " << http_request.path << std::endl;
+
+        // 确认访问的资源是否存在
+        struct stat st;
+        // stat获取文件的元数据
+        if (stat(http_request.path.c_str(), &st) == 0)
+        {
+            // 资源存在
+            // 请求的资源是目录，不被允许，直接跳转到首页
+            if (S_ISDIR(st.st_mode))
+            {
+                http_request.path += "/";
+                http_request.path += HOME_PAGE;
+                stat(http_request.path.c_str(), &st); // 如果是目录，就更新一下文件信息
+            }
+            // 请求的资源是可执行文件
+            if ((st.st_mode & S_IXUSR) || (st.st_mode & S_IXGRP) || (st.st_mode & S_IXOTH))
+            {
+                // 特殊处理,使用cgi来处理
+                http_request.cgi = true;
+            }
+            size = st.st_size; // 保存请求文件的大小，后续发送响应报文需要使用
+        }
+        else
+        {
+            // 资源不存在
+            std::string info = http_request.path;
+            info += "Not Found!";
+            LOG(WARRING, info);
+            code = NOT_FOUND;
+            goto END;
+        }
+
+        // 提取文件后缀
+        found = http_request.path.rfind("."); // 从后往前找，可能存在多个后缀
+        if (found == std::string::npos)
+        {
+            // 没找到
+            http_request.suffix = ".html"; // 默认设置为html
+        }
+        else
+        {
+            http_request.suffix = http_request.path.substr(found); // 提取后缀
+        }
+        // 是否需要使用cgi
+        if (http_request.cgi)
+        {
+            // ProcessCgi(); // 使用cgi的方式来处理请求
+        }
+        else
+        {
+            // 1. 目标网页一定是存在的
+            // 2. 返回需要构建Http响应
+            code = ProcessNonCgi(size); // 使用非cgi的方式来处理请求，就是进行一个简单的静态网页返回
+            // 可能存在打开文件出错等问题，从而修改状态码code
+        }
+    // END标签，处理错误信息
+    END:
+        if (code != OK)
+        {
+        }
     }
     // 发送响应
     void SendHttpResponse()
     {
+        auto &status_line = http_response.status_line;
+        send(sock, status_line.c_str(), status_line.size(), 0); //发送状态行
+        for (auto &iter : http_response.response_header)
+            send(sock, iter.c_str(), iter.size(), 0);
+
+        send(sock, http_response.blank.c_str(), http_response.blank.size(), 0); // 发送空行
+        sendfile(sock, http_response.fd, nullptr, http_response.size);          // 发送正文部分
+        close(http_response.fd);                                                // 发送完毕后关闭请求文件的文件描述符
     }
     ~EndPoint()
     {
@@ -183,6 +371,7 @@ public:
     }
 };
 
+//#define DEBUG 1
 // 入口类
 class Entrance
 {
