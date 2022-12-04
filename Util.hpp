@@ -46,13 +46,13 @@ public:
     }
 
     // 分割字符串 seq表示分隔符
-    static bool CutString(const std::string &target, std::string &key_out, std::string &value_out, std::string seq)
+    static bool CutString(const std::string &target, std::string &sub1_out, std::string &sub2_out, std::string seq)
     {
         size_t pos = target.find(seq);
         if (pos != std::string::npos)
         {
-            key_out = target.substr(0, pos); // substr (]前闭后开区间
-            value_out = target.substr(pos + seq.size());
+            sub1_out = target.substr(0, pos); // substr (]前闭后开区间
+            sub2_out = target.substr(pos + seq.size());
             return true;
         }
         return false;
