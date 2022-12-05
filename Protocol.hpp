@@ -8,6 +8,7 @@
 #include <sstream>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -248,6 +249,53 @@ private:
         }
         return 404;
     }
+    int ProcessCgi()
+    {
+        auto &bin = http_request.path; // 要让子进程执行的目标程序
+        int input[2];                  // 父进程从input读数据
+        int output[2];                 // 父进程从output写数据
+        if (pipe(input) < 0)
+        {
+            LOG(ERROR, "pipe input error!");
+            return 404;
+        }
+        if (pipe(output) < 0)
+        {
+            LOG(ERROR, "pipe input error!");
+            return 404;
+        }
+
+        // 新线程走到这里，但是只有httpserver一个进程，需要创建子进程来执行cgi程序
+        pid_t pid = fork();
+        if (pid == 0)
+        {
+            // child，进行exec程序替换
+            close(input[0]);  // 关闭input读端
+            close(output[1]); // 关闭output写端
+            // 替换成功以后，目标子进程如何得知，对应的读写文件的描述符是多少?
+            // 做一种约定，替换后的进程，读取管道等价于读取标准输入，写入管道，等价于写入到标准输出
+            dup2(output[0], 0);                       // 将标准输入重定向到output[0]
+            dup2(input[1], 1);                        // 将标准输出重定向到input[1]
+            execl(bin.c_str(), bin.c_str(), nullptr); //执行目标程序
+            exit(1);                                  // 失败了直接子进程退出
+        }
+        else if (pid > 0)
+        {
+            close(input[1]);          // 关闭input写端
+            close(output[0]);         // 关闭output读端
+            waitpid(pid, nullptr, 0); // 阻塞式的等待
+            // 子进程完成以后关闭文件描述符
+            close(input[0]);
+            close(output[1]);
+        }
+        else
+        {
+            // 创建子进程失败
+            LOG(ERROR, "fork error!");
+            return 404;
+        }
+        return OK;
+    }
 
 public:
     EndPoint(int _sock) : sock(_sock)
@@ -361,7 +409,7 @@ public:
         // 是否需要使用cgi
         if (http_request.cgi)
         {
-            // ProcessCgi(); // 使用cgi的方式来处理请求
+            code = ProcessCgi(); // 使用cgi的方式来处理请求
         }
         else
         {
