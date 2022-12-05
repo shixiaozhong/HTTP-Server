@@ -41,6 +41,22 @@ static std::string Code2Desc(int code)
     return desc;
 }
 
+// 处理请求文件的类型
+static std::string Suffix2Desc(const std::string &suffix)
+{
+    // 可以自行添加对应文件的content_type对应关系
+    static std::unordered_map<std::string, std::string> suffix2desc = {
+        {".html", "text/html"},
+        {".css", "text/css"},
+        {".js", "application/javascript"},
+        {".jpg", "application/x-jpg"},
+    };
+    auto iter = suffix2desc.find(suffix);
+    if (iter != suffix2desc.end())
+        return iter->second;
+    return "text/html"; // 没有找到统一按照html来处理
+}
+
 // 处理Http的请求
 class HttpRequest
 {
@@ -216,10 +232,17 @@ private:
             http_response.status_line += LINE_END;
             http_response.size = size; // 设置请求文件的大小
 
-            // 设置大小
-            std::string content_length_str = "Content_Length: ";
-            content_length_str += std::to_string(size);
-            // 设置类型
+            // 构建响应报头
+            // 设置Content_Type
+            std::string header_line = "Content_Type: ";
+            header_line += Suffix2Desc(http_request.suffix);
+            header_line += LINE_END; // 加上换行符
+            http_response.response_header.push_back(header_line);
+            // 设置Content_Length
+            header_line = "Content_Length: ";
+            header_line += std::to_string(size);
+            header_line += LINE_END; // 加上换行符
+            http_response.response_header.push_back(header_line);
 
             return OK;
         }
@@ -357,10 +380,9 @@ public:
     void SendHttpResponse()
     {
         auto &status_line = http_response.status_line;
-        send(sock, status_line.c_str(), status_line.size(), 0); //发送状态行
-        for (auto &iter : http_response.response_header)
+        send(sock, status_line.c_str(), status_line.size(), 0); // 发送状态行
+        for (auto &iter : http_response.response_header)        // 发送响应报头
             send(sock, iter.c_str(), iter.size(), 0);
-
         send(sock, http_response.blank.c_str(), http_response.blank.size(), 0); // 发送空行
         sendfile(sock, http_response.fd, nullptr, http_response.size);          // 发送正文部分
         close(http_response.fd);                                                // 发送完毕后关闭请求文件的文件描述符
