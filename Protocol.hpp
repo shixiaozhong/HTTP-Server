@@ -21,8 +21,13 @@
 #define HOME_PAGE "index.html"  // 首页
 #define HTTP_VERSION "HTTP/1.0" // http版本
 #define LINE_END "\r\n"         // 行分隔符
-#define OK 200                  // 响应状态码
+#define PAGE_404 "404.html"     // 404页面
+
+// 响应状态码
+#define OK 200
+#define BAD_REQUEST 400
 #define NOT_FOUND 404
+#define SERVER_ERROR 500
 
 // 处理状态码的描述
 static std::string Code2Desc(int code)
@@ -84,7 +89,7 @@ public:
     std::string query_string; // 参数
 
     bool cgi;
-
+    int size; // 请求文件的大小
 public:
     HttpRequest() : content_length(0), cgi(false)
     {
@@ -104,7 +109,6 @@ public:
     std::string response_body;                // 响应正文
     int status_code;                          // 状态码
     int fd;                                   // 请求文件的文件描述符
-    int size;                                 // 请求文件的大小
 public:
     // 状态码默认设置为200
     HttpResponse() : blank(LINE_END), status_code(OK), fd(-1)
@@ -216,40 +220,6 @@ private:
         }
     }
 
-    // 以非cgi的方式来处理请求
-    int ProcessNonCgi(int size)
-    {
-        // 构建响应报文
-
-        http_response.fd = open(http_request.path.c_str(), O_RDONLY); // 打开待发送的文件
-        if (http_response.fd >= 0)
-        {
-            // 构建响应状态行
-            http_response.status_line = HTTP_VERSION;
-            http_response.status_line += " ";
-            http_response.status_line += std::to_string(http_response.status_code);
-            http_response.status_line += " ";
-            http_response.status_line += Code2Desc(http_response.status_code);
-            http_response.status_line += LINE_END;
-            http_response.size = size; // 设置请求文件的大小
-
-            // 构建响应报头
-            // 设置Content_Type
-            std::string header_line = "Content_Type: ";
-            header_line += Suffix2Desc(http_request.suffix);
-            header_line += LINE_END; // 加上换行符
-            http_response.response_header.push_back(header_line);
-            // 设置Content_Length
-            header_line = "Content_Length: ";
-            header_line += std::to_string(size);
-            header_line += LINE_END; // 加上换行符
-            http_response.response_header.push_back(header_line);
-
-            return OK;
-        }
-        return 404;
-    }
-
     // 使用cgi来处理数据
     int ProcessCgi()
     {
@@ -273,13 +243,13 @@ private:
         if (pipe(input) < 0)
         {
             LOG(ERROR, "pipe input error!");
-            code = 404;
+            code = SERVER_ERROR;
             return code;
         }
         if (pipe(output) < 0)
         {
             LOG(ERROR, "pipe input error!");
-            code = 404;
+            code = SERVER_ERROR;
             return code;
         }
 
@@ -315,7 +285,7 @@ private:
             }
             else
             {
-                // TODO
+                // Do Nothing
             }
 
             // 替换成功以后，目标子进程如何得知，对应的读写文件的描述符是多少?
@@ -349,9 +319,8 @@ private:
                 // push到响应正文中
                 respose_body.push_back(ch);
             }
-
             // 处理子进程是否正常退出
-            int status;
+            int status = 0;
             pid_t ret = waitpid(pid, &status, 0); // 阻塞式的等待
             if (ret == pid)
             {
@@ -365,12 +334,12 @@ private:
                     }
                     else
                     {
-                        code = 404;
+                        code = BAD_REQUEST;
                     }
                 }
                 else
                 {
-                    code = 404;
+                    code = SERVER_ERROR;
                 }
             }
             // 子进程完成以后关闭文件描述符
@@ -386,12 +355,100 @@ private:
         return code;
     }
 
+    // 以非cgi的方式来处理请求
+    int ProcessNonCgi()
+    {
+        // 打开待发送的文件
+        http_response.fd = open(http_request.path.c_str(), O_RDONLY);
+        if (http_response.fd >= 0)
+            return OK;
+        return NOT_FOUND;
+    }
+
+    // 构建正确的响应
+    void BuildOkResponse()
+    {
+        std::string line = "Content-Type: ";
+        line += Suffix2Desc(http_request.suffix);
+        line += LINE_END;
+        http_response.response_header.push_back(line);
+        line = "Content-Length: ";
+        if (http_request.cgi == true)
+            line += std::to_string(http_response.response_body.size());
+        else
+            line += std::to_string(http_request.size); // GET
+
+        line += LINE_END;
+        http_response.response_header.push_back(line);
+    }
+
+    // 处理返回的错误页面
+    void HandlerError(std::string page)
+    {
+        // 只要出错了，就直接将cgi设为false，当作nocgi来处理
+        http_request.cgi = false;
+        // 构建响应报头
+        http_response.fd = open(page.c_str(), O_RDONLY);
+        if (http_response.fd > 0)
+        {
+            struct stat st;
+            stat(page.c_str(), &st);
+            http_request.size = st.st_size; // 更新size
+
+            std::string line = "Content-Type: text/html";
+            line += LINE_END;
+            http_response.response_header.push_back(line);
+            line = "Content-Length: ";
+            line += std::to_string(st.st_size);
+            line += LINE_END;
+            http_response.response_header.push_back(line);
+        }
+    }
+
+    // 错误处理程序,构建出错的响应报文
+    void BuildHttpResponseHelper()
+    {
+        auto &code = http_response.status_code; // 拿到状态码
+
+        // 构建响应状态行
+        auto &status_line = http_response.status_line;
+        status_line = HTTP_VERSION;
+        status_line += " ";
+        status_line += std::to_string(code);
+        status_line += " ";
+        status_line += Code2Desc(code);
+        status_line += LINE_END;
+        // 返回对应的处理页面
+        std::string path = WEB_ROOT;
+        path += "/";
+        switch (code)
+        {
+        case OK:
+            BuildOkResponse();
+            break;
+        case NOT_FOUND:
+            path += PAGE_404; // 拼接上wwwroot目录
+            HandlerError(path);
+            break;
+        case BAD_REQUEST:
+            path += PAGE_404; // 拼接上wwwroot目录
+            HandlerError(path);
+            break;
+        case SERVER_ERROR:
+            path += PAGE_404; // 拼接上wwwroot目录
+            HandlerError(path);
+            break;
+        default:
+            break;
+        }
+    }
+
 public:
     EndPoint(int _sock) : sock(_sock)
     {
     }
 
-    // 读取请求
+    // 读取和解析请求
     void RecvHttpRequest()
     {
         RecvHttpRequestLine();   // 读取请求行
@@ -408,14 +465,13 @@ public:
     {
         std::string path;                       // 临时存储路径
         auto &code = http_response.status_code; // 存储响应状态码
-        int size = 0;                           // 存储请求文件的大小
         std::size_t found = 0;                  // 用于截取请求文件后缀
         // 非法请求，只支持GET和POST方法
         if (http_request.method != "GET" && http_request.method != "POST")
         {
             LOG(WARRING, "method is not right");
-            code = NOT_FOUND;
-            goto END; // 跳到END标签
+            code = BAD_REQUEST; // 状态码设置
+            goto END;           // 跳到END标签
         }
         // 只有GET方法才是可以带参数的，设置GET方法请求的资源路径
         if (http_request.method == "GET")
@@ -474,14 +530,12 @@ public:
                 // 特殊处理,使用cgi来处理
                 http_request.cgi = true;
             }
-            size = st.st_size; // 保存请求文件的大小，后续发送响应报文需要使用
+            http_request.size = st.st_size; // 设置请求文件的大小
         }
         else
         {
             // 资源不存在
-            std::string info = http_request.path;
-            info += "Not Found!";
-            LOG(WARRING, info);
+            LOG(WARRING, http_request.path + " Not Found!");
             code = NOT_FOUND;
             goto END;
         }
@@ -500,21 +554,20 @@ public:
         // 是否需要使用cgi
         if (http_request.cgi)
         {
-            code = ProcessCgi(); // 使用cgi的方式来处理请求
+            code = ProcessCgi(); // 使用cgi的方式来处理请求，执行目标程序，拿到结果：http_response.response_body
         }
         else
         {
             // 1. 目标网页一定是存在的
             // 2. 返回需要构建Http响应
-            code = ProcessNonCgi(size); // 使用非cgi的方式来处理请求，就是进行一个简单的静态网页返回
+            code = ProcessNonCgi(); // 使用非cgi的方式来处理请求，简单的网页返回，返回静态网页，只需要打开就行
             // 可能存在打开文件出错等问题，从而修改状态码code
         }
     // END标签，处理错误信息
     END:
-        if (code != OK)
-        {
-        }
+        BuildHttpResponseHelper(); // 响应状态行填充了，响应报头也填充了，正文也填充了
     }
+
     // 发送响应
     void SendHttpResponse()
     {
@@ -523,8 +576,25 @@ public:
         for (auto &iter : http_response.response_header)        // 发送响应报头
             send(sock, iter.c_str(), iter.size(), 0);
         send(sock, http_response.blank.c_str(), http_response.blank.size(), 0); // 发送空行
-        sendfile(sock, http_response.fd, nullptr, http_response.size);          // 发送正文部分
-        close(http_response.fd);                                                // 发送完毕后关闭请求文件的文件描述符
+
+        // 发送正文部分
+        // 通过cgi处理后
+        if (http_request.cgi == true)
+        {
+            auto &response_body = http_response.response_body;
+            size_t size = 0;
+            size_t total = 0;
+            const char *start = response_body.c_str();
+            std::cout << "response_body: " << response_body << std::endl;
+            while ((total < response_body.size()) && (size = send(sock, start + total, response_body.size() - total, 0)) > 0)
+                total += size;
+        }
+        // 非cgi处理后
+        else
+        {
+            sendfile(sock, http_response.fd, nullptr, http_request.size); // 发送正文部分
+            close(http_response.fd);                                      // 发送完毕后关闭请求文件的文件描述符
+        }
     }
     ~EndPoint()
     {
