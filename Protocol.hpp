@@ -185,7 +185,7 @@ private:
         if (method == "POST")
         {
             auto &header_kv = http_request.header_kv;
-            auto iter = header_kv.find("content_length");
+            auto iter = header_kv.find("Content-Length");
             if (iter != header_kv.end())
             {
                 http_request.content_length = atoi(iter->second.c_str()); // 如果存在的话就储存在content_length中
@@ -249,20 +249,38 @@ private:
         }
         return 404;
     }
+
+    // 使用cgi来处理数据
     int ProcessCgi()
     {
-        auto &bin = http_request.path; // 要让子进程执行的目标程序
-        int input[2];                  // 父进程从input读数据
-        int output[2];                 // 父进程从output写数据
+        int code = OK;
+
+        // 父进程数据
+        auto &method = http_request.method;
+        auto &query_string = http_request.query_string;   // uri中提取出来的参数，来自GET方法
+        auto &body_text = http_request.request_body;      // 请求正文中数据， 来自POST方法
+        int content_length = http_request.content_length; // 发送给子进程的数据长度
+
+        std::string query_string_env;                     // query_string的环境变量
+        std::string method_env;                           // method的环境变量
+        std::string content_length_env;                   // content_length的环境变量
+        auto &bin = http_request.path;                    // 要让子进程执行的目标程序
+        auto &respose_body = http_response.response_body; // 响应正文
+
+        int input[2];  // 父进程从input读数据
+        int output[2]; // 父进程从output写数据
+
         if (pipe(input) < 0)
         {
             LOG(ERROR, "pipe input error!");
-            return 404;
+            code = 404;
+            return code;
         }
         if (pipe(output) < 0)
         {
             LOG(ERROR, "pipe input error!");
-            return 404;
+            code = 404;
+            return code;
         }
 
         // 新线程走到这里，但是只有httpserver一个进程，需要创建子进程来执行cgi程序
@@ -272,18 +290,89 @@ private:
             // child，进行exec程序替换
             close(input[0]);  // 关闭input读端
             close(output[1]); // 关闭output写端
+
+            // 将请求的方法也传递给子进程，子进程通过环境变量来确定是哪种方法传递的数据，从而确定是从管道还是环境变量中读写
+            method_env = "METHOD=";
+            method_env += method;
+            putenv((char *)method_env.c_str()); // putenv函数将新添加的环境变量导入到进程的上下文当中
+
+            // GET方法传递的数据通过环境变量来传递，环境变量具有全局属性,GET传递的参数一般比较少，使用环境变量效率较高
+            if (method == "GET")
+            {
+                query_string_env = "QUERY_STRING=";
+                query_string_env += query_string;
+                putenv((char *)query_string_env.c_str());
+                LOG(INFO, "Get Method Add Query_String Env");
+            }
+
+            // 将POST方法发送数据的长度通过环境变量传递给子进程
+            else if (method == "POST")
+            {
+                content_length_env = "CONTENT_LENGTH=";
+                content_length_env += std::to_string(content_length);
+                putenv((char *)content_length_env.c_str());
+                LOG(INFO, "Post Method Add Content_Length Env");
+            }
+            else
+            {
+                // TODO
+            }
+
             // 替换成功以后，目标子进程如何得知，对应的读写文件的描述符是多少?
             // 做一种约定，替换后的进程，读取管道等价于读取标准输入，写入管道，等价于写入到标准输出
-            dup2(output[0], 0);                       // 将标准输入重定向到output[0]
-            dup2(input[1], 1);                        // 将标准输出重定向到input[1]
+            dup2(output[0], 0); // 将标准输入重定向到output[0]
+            dup2(input[1], 1);  // 将标准输出重定向到input[1]
+
             execl(bin.c_str(), bin.c_str(), nullptr); //执行目标程序
             exit(1);                                  // 失败了直接子进程退出
         }
         else if (pid > 0)
         {
-            close(input[1]);          // 关闭input写端
-            close(output[0]);         // 关闭output读端
-            waitpid(pid, nullptr, 0); // 阻塞式的等待
+            close(input[1]);  // 关闭input写端
+            close(output[0]); // 关闭output读端
+
+            // 如果方法为POST
+            if (method == "POST")
+            {
+                const char *start = body_text.c_str();
+                int total = 0;
+                int size = 0;
+                // 因为管道容量可能一次无法写入这么多的数据，所以可能需要多次写入
+                while ((total < content_length) && (size = write(output[1], start + size, body_text.size() - total)) > 0)
+                    total += size;
+            }
+
+            char ch = 0;
+            // 子进程处理完数据后需要返回给父进程
+            while (read(input[0], &ch, 1) > 0)
+            {
+                // push到响应正文中
+                respose_body.push_back(ch);
+            }
+
+            // 处理子进程是否正常退出
+            int status;
+            pid_t ret = waitpid(pid, &status, 0); // 阻塞式的等待
+            if (ret == pid)
+            {
+                // 判断子进程是不是正常退出
+                if (WIFEXITED(status))
+                {
+                    // 退出码是不是0
+                    if (WEXITSTATUS(status) == 0)
+                    {
+                        code = OK;
+                    }
+                    else
+                    {
+                        code = 404;
+                    }
+                }
+                else
+                {
+                    code = 404;
+                }
+            }
             // 子进程完成以后关闭文件描述符
             close(input[0]);
             close(output[1]);
@@ -294,7 +383,7 @@ private:
             LOG(ERROR, "fork error!");
             return 404;
         }
-        return OK;
+        return code;
     }
 
 public:
@@ -328,7 +417,7 @@ public:
             code = NOT_FOUND;
             goto END; // 跳到END标签
         }
-        // 只有GET方法才是可以带参数的
+        // 只有GET方法才是可以带参数的，设置GET方法请求的资源路径
         if (http_request.method == "GET")
         {
             size_t pos = http_request.uri.find('?');
@@ -346,6 +435,8 @@ public:
         }
         else if (http_request.method == "POST")
         {
+            // 设置post请求的资源路径
+            http_request.path = http_request.uri;
             // 使用cgi来处理数据
             http_request.cgi = true;
         }
