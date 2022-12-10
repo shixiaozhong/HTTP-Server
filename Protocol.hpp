@@ -69,8 +69,8 @@ class HttpRequest
 public:
     // 原始报文数据
     std::string request_line;                // 请求行
-    std::vector<std::string> request_header; //请求报头
-    std::string blank;                       //空行
+    std::vector<std::string> request_header; // 请求报头
+    std::string blank;                       // 空行
     std::string request_body;                // 请求正文
 
     // 解析完毕之后的结果
@@ -127,25 +127,39 @@ private:
     int sock;
     HttpRequest http_request;
     HttpResponse http_response;
+    bool stop;
 
 private:
     // 读取请求行
-    void RecvHttpRequestLine()
+    bool RecvHttpRequestLine()
     {
-        Util::ReadLine(sock, http_request.request_line); // 读取请求行
-        auto &line = http_request.request_line;
-        line.resize(line.size() - 1); // 去掉 \n
-        LOG(INFO, line);
+        if (Util::ReadLine(sock, http_request.request_line) > 0) // 读取请求行
+        {
+            auto &line = http_request.request_line;
+            line.resize(line.size() - 1); // 去掉 \n
+            LOG(INFO, line);
+        }
+        else
+        {
+            // 读取出错
+            stop = true;
+        }
+        return stop;
     }
 
     // 读取请求报头
-    void RecvHttpRequestHeader()
+    bool RecvHttpRequestHeader()
     {
         std::string line;
         while (true)
         {
             line.clear();
-            Util::ReadLine(sock, line);
+            if (Util::ReadLine(sock, line) <= 0)
+            {
+                // 读取错误
+                stop = true;
+                break;
+            }
             if (line == "\n")
             {
                 http_request.blank = line; // 将读到的空行放到blank中
@@ -155,6 +169,7 @@ private:
             http_request.request_header.push_back(line); // 将读到的整行push_back到requese_header中
             LOG(INFO, line);
         }
+        return stop;
     }
 
     // 解析请求行， 拿到方法，URI，HTTP版本
@@ -199,8 +214,8 @@ private:
         return false;
     }
 
-    //读取正文部分
-    void RecvHttpRequestBody()
+    // 读取正文部分
+    bool RecvHttpRequestBody()
     {
         if (IsNeedRecvHttpRequestBody())
         {
@@ -215,9 +230,15 @@ private:
                     content_length--;
                 }
                 else
+                {
+                    // 读取出错
+                    stop = true;
                     break;
+                }
             }
+            LOG(INFO, body);
         }
+        return stop;
     }
 
     // 使用cgi来处理数据
@@ -293,7 +314,7 @@ private:
             dup2(output[0], 0); // 将标准输入重定向到output[0]
             dup2(input[1], 1);  // 将标准输出重定向到input[1]
 
-            execl(bin.c_str(), bin.c_str(), nullptr); //执行目标程序
+            execl(bin.c_str(), bin.c_str(), nullptr); // 执行目标程序
             exit(1);                                  // 失败了直接子进程退出
         }
         else if (pid > 0)
@@ -444,20 +465,26 @@ private:
     }
 
 public:
-    EndPoint(int _sock) : sock(_sock)
+    EndPoint(int _sock) : sock(_sock), stop(false)
     {
+    }
+
+    // 判断是否为stop
+    bool IsStop()
+    {
+        return stop;
     }
 
     // 读取和解析请求
     void RecvHttpRequest()
     {
-        RecvHttpRequestLine();   // 读取请求行
-        RecvHttpRequestHeader(); // 读取请求报头
-
-        // 解析请求
-        ParseHttpRequestLine();   // 解析请求行
-        ParseHttpRequestHeader(); // 解析报头
-        RecvHttpRequestBody();    // 读取正文部分
+        // 读取请求行和报头
+        if (!RecvHttpRequestLine() && !RecvHttpRequestHeader())
+        {
+            ParseHttpRequestLine();   // 解析请求行
+            ParseHttpRequestHeader(); // 解析报头
+            RecvHttpRequestBody();    // 读取正文部分
+        }
     }
 
     // 构建响应
@@ -602,8 +629,8 @@ public:
     }
 };
 
-//#define DEBUG 1
-// 入口类
+// #define DEBUG 1
+//  入口类
 class Entrance
 {
 public:
@@ -625,9 +652,18 @@ public:
         std::cout << "----------------------end--------------------" << std::endl;
 #else
         EndPoint *ep = new EndPoint(sock);
-        ep->RecvHttpRequest();   // 读取请求
-        ep->BuildHttpResponse(); // 构建响应
-        ep->SendHttpResponse();  // 发送响应
+        ep->RecvHttpRequest(); // 读取请求
+        if (!ep->IsStop())
+        {
+            // 读取成功，开始响应处理
+            LOG(INFO, "Recv No Error, Begin Build And Send");
+            ep->BuildHttpResponse(); // 构建响应
+            ep->SendHttpResponse();  // 发送响应
+        }
+        else
+        {
+            LOG(WARRING, "Recv Error, Stop Build And Send");
+        }
         delete ep;
 #endif
         LOG(INFO, "handle request end...");

@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <pthread.h>
+#include <signal.h>
 #include "Protocol.hpp"
 #include "TCPServer.hpp"
 #include "Log.hpp"
@@ -21,6 +22,8 @@ public:
     }
     void InitServer()
     {
+        // 忽略掉SIGPIPE信号， 如果不忽略，在写入时server可能崩溃
+        signal(SIGPIPE, SIG_IGN);
         tcp_server = TcpServer::GetInstance(port);
     }
     void Loop()
