@@ -631,14 +631,21 @@ public:
 
 // #define DEBUG 1
 //  入口类
-class Entrance
+class CallBack
 {
 public:
-    static void *HandlerRequest(void *_sock)
+    CallBack()
+    {
+    }
+    // 重载(), 仿函数
+    void operator()(int sock)
+    {
+        HandlerRequest(sock);
+    }
+    void HandlerRequest(int sock)
     {
         LOG(INFO, "handle request begin...");
-        int sock = *(int *)_sock;
-        delete (int *)_sock;
+
         // // std::cout << "get a new link...." << sock << std::endl;
         // std::string line;           // 存储读取到的行
         // Util::ReadLine(sock, line); // 按行来读取
@@ -667,6 +674,8 @@ public:
         delete ep;
 #endif
         LOG(INFO, "handle request end...");
-        return nullptr;
+    }
+    ~CallBack()
+    {
     }
 };
